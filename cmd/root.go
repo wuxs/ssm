@@ -84,10 +84,17 @@ func runSSHCommand(cmd *cobra.Command, args []string) {
 	// 检查连接配置中是否存在
 	key := fmt.Sprintf("%s@%s:%s", username, hostname, port)
 	connectionConfig, exists := getConnectionConfig(key)
+	if password != ""{
+		connectionConfig.Password = password
+	}
+	if privateKeyPath != ""{
+		connectionConfig.PrivateKey = privateKeyPath
+	}
 	
 	if exists {
 		// 使用连接配置中的信息连接
 		connectUsingConfig(connectionConfig)
+		saveConnectionConfig(connectionConfig)
 		return
 	}
 	
