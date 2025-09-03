@@ -2,63 +2,58 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"sort"
-	"strings"
-	"syscall"
-	"time"
-	"unsafe"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/sys/unix"
-	"golang.org/x/term"
+
+	"github.com/wuxs/ssm/pkg/auth"
+	"github.com/wuxs/ssm/pkg/config"
+	"github.com/wuxs/ssm/pkg/terminal"
+	"github.com/wuxs/ssm/pkg/utils"
 )
 
-// SSHConnectionConfig 表示SSH连接配置项
-type SSHConnectionConfig struct {
-	Host       string `json:"host"`
-	Username   string `json:"username"`
-	Port       string `json:"port"`
-	PrivateKey string `json:"private_key,omitempty"`
-	Password   string `json:"password,omitempty"`
-	LastUsed   string `json:"last_used"`
-}
-
-// SSHConfigStore 表示SSH连接配置存储
-type SSHConfigStore struct {
-	Items map[string]SSHConnectionConfig `json:"items"`
-}
-
-// sshCmd represents the ssh command
 var rootCmd = &cobra.Command{
-	Use:   "ssh [user@]hostname[:port]",
+	Use:   "ssm [user@]hostname[:port]",
 	Short: "Connect to a remote server via SSH",
-	Long: `Connect to a remote server using SSH protocol.
-Example:
+	Long: `Connect to a remote server using SSH protocol with optional jump host support.
+
+Examples:
   ssm user@hostname
   ssm user@hostname:2222
-  ssm hostname`,
+  ssm hostname
+  ssm -J jumphost user@target                    # Connect via jump host
+  ssm -J user@jumphost:2222 user@target:22       # Connect via jump host with custom port
+  ssm --proxy-jump jump.example.com user@target.example.com`,
 	Run: runSSHCommand,
 }
 
-// runSSHCommand 是SSH命令的主要执行函数
+func init() {
+	rootCmd.Flags().StringP("identity", "i", "", "Private key file for authentication (default is ~/.ssh/id_rsa)")
+	rootCmd.Flags().StringP("port", "p", "", "Port to connect to on the remote host")
+	rootCmd.Flags().StringP("proxy-jump", "J", "", "Connect via jump host. Format: [user@]hostname[:port]")
+	rootCmd.Flags().BoolP("list", "l", false, "List SSH connection configurations")
+	rootCmd.Flags().StringP("delete", "d", "", "Delete SSH connection configuration by key (user@host:port)")
+}
+
+func Execute() {
+	err := rootCmd.Execute()
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
 func runSSHCommand(cmd *cobra.Command, args []string) {
 	// 检查是否要列出连接配置
-	listConfigs, _ := cmd.Flags().GetBool("list")
-	if listConfigs {
-		displaySSHConfigs()
+	if listConfigs, _ := cmd.Flags().GetBool("list"); listConfigs {
+		displayConfigs()
 		return
 	}
 
 	// 检查是否要删除连接配置
-	deleteConfig, _ := cmd.Flags().GetString("delete")
-	if deleteConfig != "" {
-		handleDeleteConfig(deleteConfig)
+	if deleteKey, _ := cmd.Flags().GetString("delete"); deleteKey != "" {
+		handleDelete(deleteKey)
 		return
 	}
 
@@ -69,427 +64,173 @@ func runSSHCommand(cmd *cobra.Command, args []string) {
 	}
 
 	host := args[0]
-	
+
 	// 解析主机信息
-	username, hostname, port := parseSSHHost(host)
-	
-	// 设置默认值
-	username = getDefaultUsername(username)
-	port = getDefaultPort(port)
+	username, hostname, port := utils.ParseSSHHost(host)
 
 	// 获取标志
-	password, _ := cmd.Flags().GetString("password")
 	privateKeyPath, _ := cmd.Flags().GetString("identity")
-	
-	// 检查连接配置中是否存在
-	key := fmt.Sprintf("%s@%s:%s", username, hostname, port)
-	connectionConfig, exists := getConnectionConfig(key)
-	if password != ""{
-		connectionConfig.Password = password
-	}
-	if privateKeyPath != ""{
-		connectionConfig.PrivateKey = privateKeyPath
-	}
-	
-	if exists {
-		// 使用连接配置中的信息连接
-		connectUsingConfig(connectionConfig)
-		saveConnectionConfig(connectionConfig)
-		return
-	}
-	
-	// 获取默认私钥路径
-	privateKeyPath = getDefaultPrivateKeyPath(privateKeyPath)
-	
-	// 创建新的连接配置项
-	newConnectionConfig := SSHConnectionConfig{
-		Host:       hostname,
-		Username:   username,
-		Port:       port,
-		PrivateKey: privateKeyPath,
-		Password:   password,
-		LastUsed:   time.Now().Format(time.RFC3339),
-	}
-	
-	// 保存到连接配置
-	if err := saveConnectionConfig(newConnectionConfig); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to save connection config: %v\n", err)
-	}
-	
-	establishSSHConnection(newConnectionConfig)
-}
+	proxyJump, _ := cmd.Flags().GetString("proxy-jump")
+	privateKeyPath = utils.GetDefaultPrivateKeyPath(privateKeyPath)
 
-func init() {
-	// 添加SSH相关标志
-	rootCmd.Flags().StringP("identity", "i", "", "Private key file for authentication (default is ~/.ssh/id_rsa)")
-	rootCmd.Flags().StringP("port", "p", "", "Port to connect to on the remote host")
-	rootCmd.Flags().String("password", "", "Password for authentication")
-	rootCmd.Flags().BoolP("list", "l", false, "List SSH connection configurations")
-	rootCmd.Flags().StringP("delete", "d", "", "Delete SSH connection configuration by key (user@host:port)")
-}
+	// 检查现有配置
+	key := utils.GetConfigKey(username, hostname, port)
+	sshConfig, exists := config.Get(key)
+	if !exists {
+		// 创建新配置
+		sshConfig = &config.SSHConfig{
+			Host:       hostname,
+			Username:   username,
+			Port:       port,
+			PrivateKey: privateKeyPath,
+			ProxyJump:  proxyJump,
+		}
+	} else {
+		// 更新现有配置
+		if privateKeyPath != "" {
+			sshConfig.PrivateKey = privateKeyPath
+		}
+		if proxyJump != "" {
+			sshConfig.ProxyJump = proxyJump
+		}
+	}
 
-// Execute 启动命令执行
-func Execute() {
-	err := rootCmd.Execute()
-	if err != nil {
+	// 建立SSH连接
+	if err := establishConnection(sshConfig); err != nil {
+		fmt.Fprintf(os.Stderr, "Connection failed: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// parseSSHHost 解析主机信息
-func parseSSHHost(host string) (username, hostname, port string) {
-	// 解析 user@hostname:port 格式
-	if atPos := strings.Index(host, "@"); atPos != -1 {
-		username = host[:atPos]
-		host = host[atPos+1:]
-	}
-
-	if colonPos := strings.Index(host, ":"); colonPos != -1 {
-		hostname = host[:colonPos]
-		port = host[colonPos+1:]
-	} else {
-		hostname = host
-	}
-
-	return username, hostname, port
-}
-
-// getDefaultUsername 获取默认用户名
-func getDefaultUsername(username string) string {
-	if username != "" {
-		return username
-	}
-	
-	if user := os.Getenv("USER"); user != "" {
-		return user
-	}
-	
-	return "root"
-}
-
-// getDefaultPort 获取默认端口
-func getDefaultPort(port string) string {
-	if port != "" {
-		return port
-	}
-	return "22"
-}
-
-// getDefaultPrivateKeyPath 获取默认私钥路径
-func getDefaultPrivateKeyPath(privateKeyPath string) string {
-	if privateKeyPath != "" {
-		return privateKeyPath
-	}
-	return filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa")
-}
-
-// establishSSHConnection 建立SSH连接
-func establishSSHConnection(config SSHConnectionConfig) {
-	// 配置SSH客户端
-	clientConfig, err := createSSHClientConfig(config)
+func establishConnection(cfg *config.SSHConfig) error {
+	// 创建SSH客户端配置
+	clientConfig, err := auth.CreateClientConfig(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create SSH config: %v\n", err)
-		return
+		return fmt.Errorf("failed to create SSH config: %v", err)
 	}
 
-	// 连接服务器
-	addr := config.Host + ":" + config.Port
-	client, err := ssh.Dial("tcp", addr, clientConfig)
+	// 连接SSH服务器（支持跳板机）
+	client, err := connectWithJump(cfg, clientConfig)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to dial: %v\n", err)
-		return
+		return fmt.Errorf("failed to connect: %v", err)
 	}
 	defer client.Close()
 
 	// 创建会话
 	session, err := client.NewSession()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create session: %v\n", err)
-		return
+		return fmt.Errorf("failed to create session: %v", err)
 	}
 	defer session.Close()
 
-	// 设置终端为原始模式
-	fd := int(os.Stdin.Fd())
-	state, err := term.MakeRaw(fd)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to make terminal raw: %v\n", err)
-		return
+	// 连接成功，更新并保存配置
+	cfg.UpdateLastUsed()
+	if err := config.SaveConfig(cfg); err != nil {
+		fmt.Printf("Warning: Failed to save config: %v\n", err)
 	}
-	defer term.Restore(fd, state)
 
 	// 设置会话的输入输出
 	session.Stdin = os.Stdin
 	session.Stdout = os.Stdout
 	session.Stderr = os.Stderr
 
-	// 获取初始窗口大小
-	w, h, err := getTerminalSize(fd)
+	// 启动交互式终端会话
+	terminalManager := terminal.NewTerminalManager()
+	return terminalManager.StartInteractiveSession(session, nil)
+}
+
+func connectWithJump(cfg *config.SSHConfig, clientConfig *ssh.ClientConfig) (*ssh.Client, error) {
+	// 如果没有跳板机，直接连接
+	if cfg.ProxyJump == "" {
+		addr := cfg.Host + ":" + cfg.Port
+		fmt.Printf("Connecting to %s...\n", addr)
+		return ssh.Dial("tcp", addr, clientConfig)
+	}
+
+	// 解析跳板机配置
+	jumpConfig := parseJumpConfig(cfg.ProxyJump)
+
+	// 创建跳板机SSH配置
+	jumpClientConfig, err := auth.CreateClientConfig(jumpConfig)
 	if err != nil {
-		w, h = 80, 40 // 默认大小
+		return nil, fmt.Errorf("failed to create jump host SSH config: %v", err)
 	}
 
-	// 请求PTY，使用实际窗口大小
-	if err := session.RequestPty("xterm-256color", h, w, ssh.TerminalModes{}); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to request pty: %v\n", err)
-		return
-	}
-
-	// 启动shell
-	if err := session.Shell(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start shell: %v\n", err)
-		return
-	}
-
-	// 启动goroutine监听窗口大小变化
-	go monitorWindowSize(fd, session)
-
-	// 等待会话结束
-	session.Wait()
-}
-
-// createSSHClientConfig 创建SSH客户端配置
-func createSSHClientConfig(config SSHConnectionConfig) (*ssh.ClientConfig, error) {
-	var authMethods []ssh.AuthMethod
-	
-	// 如果提供了私钥路径，则添加私钥认证
-	if config.PrivateKey != "" {
-		signer, err := loadPrivateKey(config.PrivateKey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to load private key: %v\n", err)
-		} else {
-			authMethods = append(authMethods, ssh.PublicKeys(signer))
-		}
-	}
-	
-	// 如果提供了密码，则添加密码认证
-	if config.Password != "" {
-		authMethods = append(authMethods, ssh.Password(config.Password))
-	}
-	
-	clientConfig := &ssh.ClientConfig{
-		User:            config.Username,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // 注意：生产环境中应使用更安全的验证方式
-	}
-	
-	return clientConfig, nil
-}
-
-// loadPrivateKey 加载私钥
-func loadPrivateKey(privateKeyPath string) (ssh.Signer, error) {
-	key, err := os.ReadFile(privateKeyPath)
+	// 连接跳板机
+	jumpAddr := jumpConfig.Host + ":" + jumpConfig.Port
+	fmt.Printf("Connecting to jump host %s...\n", jumpAddr)
+	jumpClient, err := ssh.Dial("tcp", jumpAddr, jumpClientConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read private key: %v", err)
+		return nil, fmt.Errorf("failed to connect to jump host: %v", err)
 	}
 
-	signer, err := ssh.ParsePrivateKey(key)
+	// 保存跳板机配置（如果连接成功）
+	jumpConfig.UpdateLastUsed()
+	if err := config.SaveConfig(jumpConfig); err != nil {
+		fmt.Printf("Warning: Failed to save jump host config: %v\n", err)
+	}
+
+	// 通过跳板机连接到目标服务器
+	targetAddr := cfg.Host + ":" + cfg.Port
+	fmt.Printf("Connecting to target host %s through jump host...\n", targetAddr)
+	targetConn, err := jumpClient.Dial("tcp", targetAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %v", err)
-	}
-	
-	return signer, nil
-}
-
-// getTerminalSize 获取终端窗口大小
-func getTerminalSize(fd int) (int, int, error) {
-	ws := &unix.Winsize{}
-	_, _, errno := unix.Syscall(
-		unix.SYS_IOCTL,
-		uintptr(fd),
-		uintptr(syscall.TIOCGWINSZ),
-		uintptr(unsafe.Pointer(ws)),
-	)
-	if errno != 0 {
-		return 0, 0, fmt.Errorf("failed to get terminal size")
-	}
-	return int(ws.Col), int(ws.Row), nil
-}
-
-// monitorWindowSize 监听窗口大小变化
-func monitorWindowSize(fd int, session *ssh.Session) {
-	// 创建信号通道监听窗口大小变化
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGWINCH)
-
-	// 立即发送一次初始大小
-	if w, h, err := getTerminalSize(fd); err == nil {
-		session.WindowChange(h, w)
+		jumpClient.Close()
+		return nil, fmt.Errorf("failed to dial target through jump host: %v", err)
 	}
 
-	// 持续监听窗口大小变化
-	for range sigChan {
-		if w, h, err := getTerminalSize(fd); err == nil {
-			session.WindowChange(h, w)
-		}
-	}
-}
-
-// getConfigFilePath 获取配置文件路径
-func getConfigFilePath() string {
-	homeDir, err := os.UserHomeDir()
+	// 建立SSH连接
+	ncc, chans, reqs, err := ssh.NewClientConn(targetConn, targetAddr, clientConfig)
 	if err != nil {
-		homeDir = os.Getenv("HOME")
+		targetConn.Close()
+		jumpClient.Close()
+		return nil, fmt.Errorf("failed to establish SSH connection: %v", err)
 	}
-	return filepath.Join(homeDir, ".ssm", "ssh_config.json")
+
+	return ssh.NewClient(ncc, chans, reqs), nil
 }
 
-// loadSSHConfigs 加载SSH连接配置
-func loadSSHConfigs() (*SSHConfigStore, error) {
-	configFile := getConfigFilePath()
-
-	// 如果文件不存在，返回空配置存储
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		return &SSHConfigStore{Items: make(map[string]SSHConnectionConfig)}, nil
+func parseJumpConfig(proxyJump string) *config.SSHConfig {
+	username, hostname, port := utils.ParseSSHHost(proxyJump)
+	key := utils.GetConfigKey(username, hostname, port)
+	// 先尝试从保存的配置中查找
+	if jumpConfig, exists := config.Get(key); exists {
+		return jumpConfig
 	}
 
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return nil, err
+	return &config.SSHConfig{
+		Host:     hostname,
+		Username: username,
+		Port:     port,
 	}
-
-	var configStore SSHConfigStore
-	if err := json.Unmarshal(data, &configStore); err != nil {
-		return nil, err
-	}
-
-	// 确保 Items 不为 nil
-	if configStore.Items == nil {
-		configStore.Items = make(map[string]SSHConnectionConfig)
-	}
-
-	return &configStore, nil
 }
 
-// saveSSHConfigs 保存SSH连接配置
-func saveSSHConfigs(configStore *SSHConfigStore) error {
-	configFile := getConfigFilePath()
-
-	// 确保目录存在
-	dir := filepath.Dir(configFile)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(configStore, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(configFile, data, 0600)
-}
-
-// saveConnectionConfig 保存连接配置项
-func saveConnectionConfig(config SSHConnectionConfig) error {
-	configStore, err := loadSSHConfigs()
-	if err != nil {
-		return err
-	}
-
-	// 使用 user@host:port 作为键
-	key := fmt.Sprintf("%s@%s:%s", config.Username, config.Host, config.Port)
-	configStore.Items[key] = config
-
-	return saveSSHConfigs(configStore)
-}
-
-// getConnectionConfig 获取连接配置项
-func getConnectionConfig(key string) (SSHConnectionConfig, bool) {
-	configStore, err := loadSSHConfigs()
-	if err != nil || configStore.Items == nil {
-		return SSHConnectionConfig{}, false
-	}
-	
-	config, exists := configStore.Items[key]
-	return config, exists
-}
-
-// displaySSHConfigs 列出SSH连接配置
-func displaySSHConfigs() {
-	configStore, err := loadSSHConfigs()
+func displayConfigs() {
+	configs, err := config.List()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load configs: %v\n", err)
 		return
 	}
 
-	if len(configStore.Items) == 0 {
+	if len(configs) == 0 {
 		fmt.Println("No SSH connection configurations found.")
 		return
 	}
 
 	fmt.Println("SSH Connection Configurations:")
-
-	// 按最后使用时间排序
-	type configEntry struct {
-		Key    string
-		Config SSHConnectionConfig
-	}
-
-	entries := make([]configEntry, 0, len(configStore.Items))
-	for k, v := range configStore.Items {
-		entries = append(entries, configEntry{Key: k, Config: v})
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Config.LastUsed > entries[j].Config.LastUsed
-	})
-
-	for i, entry := range entries {
-		authMethod := getAuthMethodDescription(entry.Config)
-		fmt.Printf("%d. %s %s (%s)\n", i+1, entry.Config.LastUsed, entry.Key, authMethod)
+	for i, cfg := range configs {
+		line := fmt.Sprintf("%d. %s", i+1, cfg.GetKey())
+		if cfg.ProxyJump != "" {
+			line += fmt.Sprintf(" via %s", cfg.ProxyJump)
+		}
+		fmt.Println(line)
 	}
 }
 
-// getAuthMethodDescription 获取认证方式描述
-func getAuthMethodDescription(config SSHConnectionConfig) string {
-	switch {
-	case config.PrivateKey != "" && config.Password != "":
-		return "password+key"
-	case config.PrivateKey != "":
-		return "key"
-	case config.Password != "":
-		return "password"
-	default:
-		return "unknown"
-	}
-}
-
-// connectUsingConfig 使用连接配置进行连接
-func connectUsingConfig(config SSHConnectionConfig) {
-	// 更新最后使用时间
-	config.LastUsed = time.Now().Format(time.RFC3339)
-	if err := saveConnectionConfig(config); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to update config: %v\n", err)
-	}
-
-	// 使用连接配置中的信息连接
-	establishSSHConnection(config)
-}
-
-// handleDeleteConfig 处理删除连接配置
-func handleDeleteConfig(key string) {
-	if err := deleteConnectionConfig(key); err != nil {
+func handleDelete(key string) {
+	if err := config.Delete(key); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to delete config: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Successfully deleted connection config: %s\n", key)
-}
-
-// deleteConnectionConfig 删除连接配置项
-func deleteConnectionConfig(key string) error {
-	configStore, err := loadSSHConfigs()
-	if err != nil {
-		return err
-	}
-
-	// 检查配置是否存在
-	if _, exists := configStore.Items[key]; !exists {
-		return fmt.Errorf("connection config not found: %s", key)
-	}
-
-	// 删除配置
-	delete(configStore.Items, key)
-
-	// 保存更新后的配置存储
-	return saveSSHConfigs(configStore)
 }

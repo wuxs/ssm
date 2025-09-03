@@ -1,4 +1,4 @@
-module ssm
+module github.com/wuxs/ssm
 
 go 1.23.8
 
