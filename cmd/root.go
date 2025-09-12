@@ -3,6 +3,8 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"net"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -35,6 +37,8 @@ func init() {
 	rootCmd.Flags().StringP("proxy-jump", "J", "", "Connect via jump host. Format: [user@]hostname[:port]")
 	rootCmd.Flags().BoolP("list", "l", false, "List SSH connection configurations")
 	rootCmd.Flags().StringP("delete", "d", "", "Delete SSH connection configuration by key (user@host:port)")
+	rootCmd.Flags().StringSliceP("local-forward", "L", []string{}, "Local port forwarding, format: [local_port:]remote_host:remote_port")
+	rootCmd.Flags().StringSliceP("remote-forward", "R", []string{}, "Remote port forwarding, format: [remote_port:]local_host:local_port")
 }
 
 func Execute() {
@@ -71,6 +75,8 @@ func runSSHCommand(cmd *cobra.Command, args []string) {
 	// 获取标志
 	privateKeyPath, _ := cmd.Flags().GetString("identity")
 	proxyJump, _ := cmd.Flags().GetString("proxy-jump")
+	localForwards, _ := cmd.Flags().GetStringSlice("local-forward")
+	remoteForwards, _ := cmd.Flags().GetStringSlice("remote-forward")
 	privateKeyPath = utils.GetDefaultPrivateKeyPath(privateKeyPath)
 
 	// 检查现有配置
@@ -96,13 +102,13 @@ func runSSHCommand(cmd *cobra.Command, args []string) {
 	}
 
 	// 建立SSH连接
-	if err := establishConnection(sshConfig); err != nil {
+	if err := establishConnection(sshConfig, localForwards, remoteForwards); err != nil {
 		fmt.Fprintf(os.Stderr, "Connection failed: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func establishConnection(cfg *config.SSHConfig) error {
+func establishConnection(cfg *config.SSHConfig, localForwards, remoteForwards []string) error {
 	// 创建SSH客户端配置
 	clientConfig, err := auth.CreateClientConfig(cfg)
 	if err != nil {
@@ -114,7 +120,44 @@ func establishConnection(cfg *config.SSHConfig) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect: %v", err)
 	}
-	defer client.Close()
+	defer client.Close();
+
+	// 如果有端口转发需求，则处理端口转发
+	if len(localForwards) > 0 || len(remoteForwards) > 0 {
+		// 处理本地端口转发 (-L)
+		for _, forward := range localForwards {
+			lf, err := parseLocalForward(forward)
+			if err != nil {
+				return fmt.Errorf("invalid local forward format '%s': %v", forward, err)
+			}
+			
+			go func() {
+				err := startLocalForward(client, lf)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Local forward failed for %s: %v\n", forward, err)
+				}
+			}()
+			
+			fmt.Printf("Local forwarding: %s:%d -> %s:%d\n", lf.bindAddr, lf.bindPort, lf.remoteHost, lf.remotePort)
+		}
+		
+		// 处理远程端口转发 (-R)
+		for _, forward := range remoteForwards {
+			rf, err := parseRemoteForward(forward)
+			if err != nil {
+				return fmt.Errorf("invalid remote forward format '%s': %v", forward, err)
+			}
+			
+			go func() {
+				err := startRemoteForward(client, rf)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Remote forward failed for %s: %v\n", forward, err)
+				}
+			}()
+			
+			fmt.Printf("Remote forwarding: %s:%d <- %s:%d\n", rf.bindAddr, rf.bindPort, rf.localHost, rf.localPort)
+		}
+	}
 
 	// 创建会话
 	session, err := client.NewSession()
@@ -137,6 +180,204 @@ func establishConnection(cfg *config.SSHConfig) error {
 	// 启动交互式终端会话
 	terminalManager := terminal.NewTerminalManager()
 	return terminalManager.StartInteractiveSession(session, nil)
+}
+
+// LocalForward 本地端口转发配置
+type LocalForward struct {
+	bindAddr   string // 本地绑定地址
+	bindPort   uint16 // 本地绑定端口
+	remoteHost string // 远程主机
+	remotePort uint16 // 远程端口
+}
+
+// RemoteForward 远程端口转发配置
+type RemoteForward struct {
+	bindAddr  string // 远程绑定地址
+	bindPort  uint16 // 远程绑定端口
+	localHost string // 本地主机
+	localPort uint16 // 本地端口
+}
+
+// parseLocalForward 解析本地端口转发参数
+// 格式: [bind_addr:]bind_port:remote_host:remote_port 或 bind_port:remote_host:remote_port
+func parseLocalForward(arg string) (*LocalForward, error) {
+	parts := splitWithEscape(arg, ':')
+	if len(parts) < 3 || len(parts) > 4 {
+		return nil, fmt.Errorf("invalid format")
+	}
+	
+	lf := &LocalForward{}
+	
+	if len(parts) == 4 {
+		// 包含绑定地址
+		lf.bindAddr = parts[0]
+		lf.bindPort = parsePort(parts[1])
+		lf.remoteHost = parts[2]
+		lf.remotePort = parsePort(parts[3])
+	} else {
+		// 不包含绑定地址，默认为localhost
+		lf.bindAddr = "localhost"
+		lf.bindPort = parsePort(parts[0])
+		lf.remoteHost = parts[1]
+		lf.remotePort = parsePort(parts[2])
+	}
+	
+	if lf.bindPort == 0 || lf.remotePort == 0 {
+		return nil, fmt.Errorf("invalid port number")
+	}
+	
+	return lf, nil
+}
+
+// parseRemoteForward 解析远程端口转发参数
+// 格式: [bind_addr:]bind_port:local_host:local_port 或 bind_port:local_host:local_port
+func parseRemoteForward(arg string) (*RemoteForward, error) {
+	parts := splitWithEscape(arg, ':')
+	if len(parts) < 3 || len(parts) > 4 {
+		return nil, fmt.Errorf("invalid format")
+	}
+	
+	rf := &RemoteForward{}
+	
+	if len(parts) == 4 {
+		// 包含绑定地址
+		rf.bindAddr = parts[0]
+		rf.bindPort = parsePort(parts[1])
+		rf.localHost = parts[2]
+		rf.localPort = parsePort(parts[3])
+	} else {
+		// 不包含绑定地址，默认为localhost
+		rf.bindAddr = "localhost"
+		rf.bindPort = parsePort(parts[0])
+		rf.localHost = parts[1]
+		rf.localPort = parsePort(parts[2])
+	}
+	
+	if rf.bindPort == 0 || rf.localPort == 0 {
+		return nil, fmt.Errorf("invalid port number")
+	}
+	
+	return rf, nil
+}
+
+// parsePort 将字符串转换为端口号
+func parsePort(portStr string) uint16 {
+	port := uint16(0)
+	fmt.Sscanf(portStr, "%d", &port)
+	return port
+}
+
+// splitWithEscape 拆分字符串，但忽略在方括号内的冒号
+func splitWithEscape(s string, delimiter rune) []string {
+	var parts []string
+	var current string
+	inBracket := false
+	
+	for _, r := range s {
+		switch {
+		case r == '[':
+			inBracket = true
+			current += string(r)
+		case r == ']':
+			inBracket = false
+			current += string(r)
+		case r == delimiter && !inBracket:
+			parts = append(parts, current)
+			current = ""
+		default:
+			current += string(r)
+		}
+	}
+	
+	if current != "" {
+		parts = append(parts, current)
+	}
+	
+	return parts
+}
+
+// startLocalForward 启动本地端口转发
+func startLocalForward(client *ssh.Client, lf *LocalForward) error {
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", lf.bindAddr, lf.bindPort))
+	if err != nil {
+		return fmt.Errorf("failed to listen on %s:%d: %v", lf.bindAddr, lf.bindPort, err)
+	}
+	defer listener.Close()
+	
+	for {
+		// 接受本地连接
+		localConn, err := listener.Accept()
+		if err != nil {
+			return fmt.Errorf("failed to accept connection: %v", err)
+		}
+		
+		// 连接到远程主机
+		remoteAddr := fmt.Sprintf("%s:%d", lf.remoteHost, lf.remotePort)
+		remoteConn, err := client.Dial("tcp", remoteAddr)
+		if err != nil {
+			localConn.Close()
+			fmt.Fprintf(os.Stderr, "Failed to connect to %s: %v\n", remoteAddr, err)
+			continue
+		}
+		
+		// 在两个连接之间转发数据
+		go func() {
+			defer localConn.Close()
+			defer remoteConn.Close()
+			copyConn(localConn, remoteConn)
+		}()
+		
+		go func() {
+			defer localConn.Close()
+			defer remoteConn.Close()
+			copyConn(remoteConn, localConn)
+		}()
+	}
+}
+
+// startRemoteForward 启动远程端口转发
+func startRemoteForward(client *ssh.Client, rf *RemoteForward) error {
+	// 监听远程端口
+	remoteListener, err := client.Listen("tcp", fmt.Sprintf("%s:%d", rf.bindAddr, rf.bindPort))
+	if err != nil {
+		return fmt.Errorf("failed to listen on remote %s:%d: %v", rf.bindAddr, rf.bindPort, err)
+	}
+	defer remoteListener.Close()
+	
+	for {
+		// 接受远程连接
+		remoteConn, err := remoteListener.Accept()
+		if err != nil {
+			return fmt.Errorf("failed to accept remote connection: %v", err)
+		}
+		
+		// 连接到本地主机
+		localAddr := fmt.Sprintf("%s:%d", rf.localHost, rf.localPort)
+		localConn, err := net.Dial("tcp", localAddr)
+		if err != nil {
+			remoteConn.Close()
+			fmt.Fprintf(os.Stderr, "Failed to connect to %s: %v\n", localAddr, err)
+			continue
+		}
+		
+		// 在两个连接之间转发数据
+		go func() {
+			defer localConn.Close()
+			defer remoteConn.Close()
+			copyConn(localConn, remoteConn)
+		}()
+		
+		go func() {
+			defer localConn.Close()
+			defer remoteConn.Close()
+			copyConn(remoteConn, localConn)
+		}()
+	}
+}
+
+// copyConn 在两个连接之间复制数据
+func copyConn(dst net.Conn, src net.Conn) {
+	_, _ = io.Copy(dst, src)
 }
 
 func connectWithJump(cfg *config.SSHConfig, clientConfig *ssh.ClientConfig) (*ssh.Client, error) {
