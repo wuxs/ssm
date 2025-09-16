@@ -17,7 +17,7 @@ type SSHConfig struct {
 	Port       string `json:"port"`
 	PrivateKey string `json:"private_key,omitempty"`
 	Password   string `json:"password,omitempty"`
-	ProxyJump  string `json:"proxy_jump,omitempty"`
+	ProxyJump  string `json:"-"`
 	LastUsed   string `json:"last_used"`
 }
 
