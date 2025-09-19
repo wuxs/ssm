@@ -120,7 +120,7 @@ func establishConnection(cfg *config.SSHConfig, localForwards, remoteForwards []
 	if err != nil {
 		return fmt.Errorf("failed to connect: %v", err)
 	}
-	defer client.Close();
+	defer client.Close()
 
 	// 如果有端口转发需求，则处理端口转发
 	if len(localForwards) > 0 || len(remoteForwards) > 0 {
@@ -130,31 +130,31 @@ func establishConnection(cfg *config.SSHConfig, localForwards, remoteForwards []
 			if err != nil {
 				return fmt.Errorf("invalid local forward format '%s': %v", forward, err)
 			}
-			
+
 			go func() {
 				err := startLocalForward(client, lf)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Local forward failed for %s: %v\n", forward, err)
 				}
 			}()
-			
+
 			fmt.Printf("Local forwarding: %s:%d -> %s:%d\n", lf.bindAddr, lf.bindPort, lf.remoteHost, lf.remotePort)
 		}
-		
+
 		// 处理远程端口转发 (-R)
 		for _, forward := range remoteForwards {
 			rf, err := parseRemoteForward(forward)
 			if err != nil {
 				return fmt.Errorf("invalid remote forward format '%s': %v", forward, err)
 			}
-			
+
 			go func() {
 				err := startRemoteForward(client, rf)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Remote forward failed for %s: %v\n", forward, err)
 				}
 			}()
-			
+
 			fmt.Printf("Remote forwarding: %s:%d <- %s:%d\n", rf.bindAddr, rf.bindPort, rf.localHost, rf.localPort)
 		}
 	}
@@ -205,9 +205,9 @@ func parseLocalForward(arg string) (*LocalForward, error) {
 	if len(parts) < 3 || len(parts) > 4 {
 		return nil, fmt.Errorf("invalid format")
 	}
-	
+
 	lf := &LocalForward{}
-	
+
 	if len(parts) == 4 {
 		// 包含绑定地址
 		lf.bindAddr = parts[0]
@@ -221,11 +221,11 @@ func parseLocalForward(arg string) (*LocalForward, error) {
 		lf.remoteHost = parts[1]
 		lf.remotePort = parsePort(parts[2])
 	}
-	
+
 	if lf.bindPort == 0 || lf.remotePort == 0 {
 		return nil, fmt.Errorf("invalid port number")
 	}
-	
+
 	return lf, nil
 }
 
@@ -236,9 +236,9 @@ func parseRemoteForward(arg string) (*RemoteForward, error) {
 	if len(parts) < 3 || len(parts) > 4 {
 		return nil, fmt.Errorf("invalid format")
 	}
-	
+
 	rf := &RemoteForward{}
-	
+
 	if len(parts) == 4 {
 		// 包含绑定地址
 		rf.bindAddr = parts[0]
@@ -252,11 +252,11 @@ func parseRemoteForward(arg string) (*RemoteForward, error) {
 		rf.localHost = parts[1]
 		rf.localPort = parsePort(parts[2])
 	}
-	
+
 	if rf.bindPort == 0 || rf.localPort == 0 {
 		return nil, fmt.Errorf("invalid port number")
 	}
-	
+
 	return rf, nil
 }
 
@@ -272,7 +272,7 @@ func splitWithEscape(s string, delimiter rune) []string {
 	var parts []string
 	var current string
 	inBracket := false
-	
+
 	for _, r := range s {
 		switch {
 		case r == '[':
@@ -288,11 +288,11 @@ func splitWithEscape(s string, delimiter rune) []string {
 			current += string(r)
 		}
 	}
-	
+
 	if current != "" {
 		parts = append(parts, current)
 	}
-	
+
 	return parts
 }
 
@@ -303,30 +303,30 @@ func startLocalForward(client *ssh.Client, lf *LocalForward) error {
 		return fmt.Errorf("failed to listen on %s:%d: %v", lf.bindAddr, lf.bindPort, err)
 	}
 	defer listener.Close()
-	
+
 	for {
 		// 接受本地连接
 		localConn, err := listener.Accept()
 		if err != nil {
 			return fmt.Errorf("failed to accept connection: %v", err)
 		}
-		
+
 		// 连接到远程主机
 		remoteAddr := fmt.Sprintf("%s:%d", lf.remoteHost, lf.remotePort)
-		remoteConn, err := client.Dial("tcp", remoteAddr)
+		remoteConn, err := client.Dial("tcp4", remoteAddr)
 		if err != nil {
 			localConn.Close()
 			fmt.Fprintf(os.Stderr, "Failed to connect to %s: %v\n", remoteAddr, err)
 			continue
 		}
-		
+
 		// 在两个连接之间转发数据
 		go func() {
 			defer localConn.Close()
 			defer remoteConn.Close()
 			copyConn(localConn, remoteConn)
 		}()
-		
+
 		go func() {
 			defer localConn.Close()
 			defer remoteConn.Close()
@@ -343,30 +343,30 @@ func startRemoteForward(client *ssh.Client, rf *RemoteForward) error {
 		return fmt.Errorf("failed to listen on remote %s:%d: %v", rf.bindAddr, rf.bindPort, err)
 	}
 	defer remoteListener.Close()
-	
+
 	for {
 		// 接受远程连接
 		remoteConn, err := remoteListener.Accept()
 		if err != nil {
 			return fmt.Errorf("failed to accept remote connection: %v", err)
 		}
-		
+
 		// 连接到本地主机
 		localAddr := fmt.Sprintf("%s:%d", rf.localHost, rf.localPort)
-		localConn, err := net.Dial("tcp", localAddr)
+		localConn, err := net.Dial("tcp4", localAddr)
 		if err != nil {
 			remoteConn.Close()
 			fmt.Fprintf(os.Stderr, "Failed to connect to %s: %v\n", localAddr, err)
 			continue
 		}
-		
+
 		// 在两个连接之间转发数据
 		go func() {
 			defer localConn.Close()
 			defer remoteConn.Close()
 			copyConn(localConn, remoteConn)
 		}()
-		
+
 		go func() {
 			defer localConn.Close()
 			defer remoteConn.Close()
