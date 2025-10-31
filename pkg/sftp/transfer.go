@@ -208,6 +208,9 @@ func (tm *TransferManager) uploadFile(sftpClient *sftp.Client, localPath, remote
 		return tm.uploadDirectory(sftpClient, localPath, remotePath, options)
 	}
 
+	// 检查远程路径是否为目录，如果是则附加源文件名
+	remotePath = tm.resolveRemotePath(sftpClient, localPath, remotePath)
+
 	return tm.uploadSingleFile(sftpClient, localPath, remotePath, options)
 }
 
@@ -224,6 +227,9 @@ func (tm *TransferManager) downloadFile(sftpClient *sftp.Client, remotePath, loc
 		}
 		return tm.downloadDirectory(sftpClient, remotePath, localPath, options)
 	}
+
+	// 检查本地路径是否为目录，如果是则附加源文件名
+	localPath = tm.resolveLocalPath(remotePath, localPath)
 
 	return tm.downloadSingleFile(sftpClient, remotePath, localPath, options)
 }
@@ -552,4 +558,44 @@ func (tm *TransferManager) formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// resolveRemotePath 解析远程路径，如果是目录则附加源文件名
+func (tm *TransferManager) resolveRemotePath(sftpClient *sftp.Client, localPath, remotePath string) string {
+	// 如果远程路径以 / 结尾，说明用户明确指定了目录
+	if strings.HasSuffix(remotePath, "/") {
+		baseFileName := filepath.Base(localPath)
+		return strings.TrimRight(remotePath, "/") + "/" + baseFileName
+	}
+
+	// 尝试检查远程路径是否存在且为目录
+	remoteInfo, err := sftpClient.Stat(remotePath)
+	if err == nil && remoteInfo.IsDir() {
+		// 远程路径是一个目录，附加源文件名
+		baseFileName := filepath.Base(localPath)
+		return strings.TrimRight(remotePath, "/") + "/" + baseFileName
+	}
+
+	// 远程路径不存在或是文件，直接使用
+	return remotePath
+}
+
+// resolveLocalPath 解析本地路径，如果是目录则附加源文件名
+func (tm *TransferManager) resolveLocalPath(remotePath, localPath string) string {
+	// 如果本地路径以 / 或 \ 结尾，说明用户明确指定了目录
+	if strings.HasSuffix(localPath, "/") || strings.HasSuffix(localPath, "\\") {
+		baseFileName := filepath.Base(remotePath)
+		return filepath.Join(localPath, baseFileName)
+	}
+
+	// 尝试检查本地路径是否存在且为目录
+	localInfo, err := os.Stat(localPath)
+	if err == nil && localInfo.IsDir() {
+		// 本地路径是一个目录，附加源文件名
+		baseFileName := filepath.Base(remotePath)
+		return filepath.Join(localPath, baseFileName)
+	}
+
+	// 本地路径不存在或是文件，直接使用
+	return localPath
 }
