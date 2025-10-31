@@ -14,6 +14,7 @@ SSM 是一个轻量级的 SSH 连接管理工具，旨在简化和优化 SSH 连
 - **📱 终端自适应**：自动适应终端窗口大小变化
 - **⚡ 快速连接**：通过简洁的命令行接口实现一键连接
 - **🔗 端口转发**：支持本地和远程端口转发
+- **📁 文件传输**：基于SFTP的安全文件传输，支持递归目录复制
 
 ### 🔐 认证方式
 - **🔑 SSH密钥认证**：支持多种密钥格式（RSA、Ed25519、ECDSA、DSA）
@@ -67,6 +68,21 @@ ssm -J user@jumphost:2222 user@target:22
 ssm --proxy-jump jump.example.com user@target.example.com
 ```
 
+### 文件传输
+```bash
+# 上传文件到远程服务器
+ssm cp file.txt user@hostname:/remote/path/
+
+# 从远程服务器下载文件
+ssm cp user@hostname:/remote/file.txt ./
+
+# 递归复制目录
+ssm cp -r local-dir user@hostname:/remote/
+
+# 通过跳板机传输文件
+ssm cp -J jumphost file.txt user@target:/path/
+```
+
 ### 管理配置
 ```bash
 # 列出所有保存的配置
@@ -88,6 +104,15 @@ ssm --delete user@hostname:22
 | 参数 | 短参数 | 说明 | 示例 |
 |------|--------|------|------|
 | `--proxy-jump` | `-J` | 跳板机地址 | `-J user@jumphost:22` |
+
+### 📁 文件传输参数 (cp 子命令)
+| 参数 | 短参数 | 说明 | 示例 |
+|------|--------|------|------|
+| `--recursive` | `-r` | 递归复制目录 | `cp -r dir/ user@host:/path/` |
+| `--verbose` | `-v` | 显示详细输出 | `cp -v file user@host:/path/` |
+| `--preserve` | | 保持文件属性 | `cp --preserve file user@host:/path/` |
+| `--identity` | `-i` | 指定私钥文件 | `cp -i ~/.ssh/key file user@host:/path/` |
+| `--proxy-jump` | `-J` | 通过跳板机传输 | `cp -J jump user@host:/file ./` |
 
 ### 🛠️ 管理参数
 | 参数 | 短参数 | 说明 | 示例 |
@@ -144,6 +169,7 @@ ssm --delete user@hostname:22
 - 密码会以明文形式存储在配置文件中，请谨慎使用
 - 建议在生产环境中使用SSH密钥认证
 - 定期检查和清理不需要的配置
+- 大文件传输时注意网络稳定性和磁盘空间
 
 ## 🔧 故障排除
 
@@ -183,6 +209,21 @@ A: 检查项目：
 2. 检查终端模拟器设置
 3. 尝试重新调整终端窗口大小
 4. 重启SSH会话
+
+**Q: 文件传输失败或中断**
+A: 排查步骤：
+1. 检查网络连接是否稳定
+2. 确认远程路径是否存在且有写权限
+3. 验证磁盘空间是否充足
+4. 对于大文件，考虑使用 `-v` 选项查看进度
+5. 检查防火墙和SSH配置
+
+**Q: 递归目录复制不完整**
+A: 检查项目：
+1. 确认使用了 `-r` 递归标志
+2. 检查源目录的权限设置
+3. 验证目标路径是否正确
+4. 查看是否有符号链接或特殊文件
 
 ## 🤝 贡献指南
 
