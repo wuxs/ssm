@@ -17,23 +17,24 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "ssm [command] [flags] [args]",
+	Use:   "ssm [user@]hostname[:port]",
 	Short: "Simple SSH Manager - Connect to remote servers and manage SSH connections",
 	Long: `Simple SSH Manager (SSM) is a lightweight SSH connection management tool.
 It simplifies SSH connections with intelligent configuration management,
 multiple authentication methods, and jump host support.
 
 Available Commands:
-  connect    Connect to a remote server via SSH (default behavior)
   cp         Copy files to/from remote servers using SFTP
 
 Examples:
   ssm user@hostname                              # Connect to remote server
   ssm user@hostname:2222                         # Connect with custom port
   ssm -J jumphost user@target                    # Connect via jump host
+  ssm -J user@jumphost:2222 user@target:22       # Connect via jump host with custom port
   ssm cp file.txt user@host:/remote/path         # Copy file to remote
   ssm cp user@host:/remote/file.txt ./           # Copy file from remote`,
-	Run: runSSHCommand,
+	Args: cobra.MaximumNArgs(1),
+	Run:  runSSHCommand,
 }
 
 func init() {

@@ -4,6 +4,7 @@ package sftp
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,9 @@ type TransferOptions struct {
 }
 
 // TransferManager SFTP传输管理器
-type TransferManager struct{}
+type TransferManager struct {
+	sshClient *ssh.Client // 保存SSH客户端引用，用于执行命令
+}
 
 // NewTransferManager 创建新的传输管理器
 func NewTransferManager() *TransferManager {
@@ -53,6 +56,7 @@ func (tm *TransferManager) Transfer(sshConfig *config.SSHConfig, source, destina
 		return fmt.Errorf("failed to establish SSH connection: %v", err)
 	}
 	defer client.Close()
+	tm.sshClient = client
 
 	// 创建SFTP客户端
 	sftpClient, err := sftp.NewClient(client)
@@ -200,7 +204,6 @@ func (tm *TransferManager) uploadFile(sftpClient *sftp.Client, localPath, remote
 	if err != nil {
 		return fmt.Errorf("failed to stat local path: %v", err)
 	}
-
 	if localInfo.IsDir() {
 		if !options.Recursive {
 			return fmt.Errorf("cannot copy directory without -r flag")
@@ -210,7 +213,6 @@ func (tm *TransferManager) uploadFile(sftpClient *sftp.Client, localPath, remote
 
 	// 检查远程路径是否为目录，如果是则附加源文件名
 	remotePath = tm.resolveRemotePath(sftpClient, localPath, remotePath)
-
 	return tm.uploadSingleFile(sftpClient, localPath, remotePath, options)
 }
 
@@ -562,6 +564,8 @@ func (tm *TransferManager) formatBytes(bytes int64) string {
 
 // resolveRemotePath 解析远程路径，如果是目录则附加源文件名
 func (tm *TransferManager) resolveRemotePath(sftpClient *sftp.Client, localPath, remotePath string) string {
+	// 解析远程路径中的 ~
+	remotePath = tm.expandRemoteTilde(sftpClient, remotePath)
 	// 如果远程路径以 / 结尾，说明用户明确指定了目录
 	if strings.HasSuffix(remotePath, "/") {
 		baseFileName := filepath.Base(localPath)
@@ -575,9 +579,76 @@ func (tm *TransferManager) resolveRemotePath(sftpClient *sftp.Client, localPath,
 		baseFileName := filepath.Base(localPath)
 		return strings.TrimRight(remotePath, "/") + "/" + baseFileName
 	}
-
 	// 远程路径不存在或是文件，直接使用
 	return remotePath
+}
+
+// expandRemoteTilde 将远程路径中的 ~ 扩展为用户的 HOME 目录
+func (tm *TransferManager) expandRemoteTilde(sftpClient *sftp.Client, path string) string {
+	if !strings.HasPrefix(path, "~") {
+		return path
+	}
+	homeDir := tm.getRemoteHomeDir(sftpClient)
+	// 如果只是 ~，替换为 /home/username 或 /root
+	if path == "~" {
+		// 获取远程用户的 HOME 目录
+		if homeDir != "" {
+			return homeDir
+		}
+		return path // 如果无法获取，保持原样
+	}
+
+	// 如果是 ~/path 的形式
+	if strings.HasPrefix(path, "~/") {
+		if homeDir != "" {
+			// 替换 ~ 为 HOME 目录
+			return homeDir + path[1:]
+		}
+		return path // 如果无法获取，保持原样
+	}
+
+	// 其他形式的 ~，比如 ~user，暂不处理
+	return path
+}
+
+// getRemoteHomeDir 获取远程用户的 HOME 目录
+func (tm *TransferManager) getRemoteHomeDir(sftpClient *sftp.Client) string {
+	// 确保我们有 SSH 客户端引用
+	if tm.sshClient == nil {
+		log.Println("SSH client is not initialized")
+		return ""
+	}
+
+	// 创建一个新的会话来执行命令
+	session, err := tm.sshClient.NewSession()
+	if err != nil {
+		log.Println("Failed to create new SSH session:", err)
+		return ""
+	}
+	defer session.Close()
+
+	// 执行命令获取 HOME 环境变量
+	output, err := session.Output("echo $HOME")
+	if err == nil && len(output) > 0 {
+		homeDir := strings.TrimSpace(string(output))
+		if homeDir != "" && homeDir != "$HOME" {
+			return homeDir
+		}
+	}
+
+	// 备用方法：尝试使用 whoami 获取用户名然后构造 HOME 路径
+	output, err = session.Output("whoami")
+	if err == nil && len(output) > 0 {
+		username := strings.TrimSpace(string(output))
+		if username != "" {
+			if username == "root" {
+				return "/root"
+			}
+			return "/home/" + username
+		}
+	}
+
+	return ""
 }
 
 // resolveLocalPath 解析本地路径，如果是目录则附加源文件名
