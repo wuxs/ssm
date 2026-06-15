@@ -25,7 +25,8 @@ type TransferOptions struct {
 
 // TransferManager SFTP传输管理器
 type TransferManager struct {
-	sshClient *ssh.Client // 保存SSH客户端引用，用于执行命令
+	sshClient     *ssh.Client // 保存SSH客户端引用，用于执行命令
+	remoteCommand func(command string) ([]byte, error)
 }
 
 // NewTransferManager 创建新的传输管理器
@@ -66,13 +67,21 @@ func (tm *TransferManager) Transfer(sshConfig *config.SSHConfig, source, destina
 	defer sftpClient.Close()
 
 	// 执行传输
+	sourcePath, destinationPath := tm.normalizeRemoteTransferPaths(source.GetPath(), destination.GetPath(), source.IsRemoteLocation())
 	if source.IsRemoteLocation() {
 		// 远程到本地
-		return tm.downloadFile(sftpClient, source.GetPath(), destination.GetPath(), options)
+		return tm.downloadFile(sftpClient, sourcePath, destinationPath, options)
 	} else {
 		// 本地到远程
-		return tm.uploadFile(sftpClient, source.GetPath(), destination.GetPath(), options)
+		return tm.uploadFile(sftpClient, sourcePath, destinationPath, options)
 	}
+}
+
+func (tm *TransferManager) normalizeRemoteTransferPaths(sourcePath, destinationPath string, sourceIsRemote bool) (string, string) {
+	if sourceIsRemote {
+		return tm.expandRemoteTilde(sourcePath), destinationPath
+	}
+	return sourcePath, tm.expandRemoteTilde(destinationPath)
 }
 
 // establishSSHConnection 建立SSH连接
@@ -565,7 +574,7 @@ func (tm *TransferManager) formatBytes(bytes int64) string {
 // resolveRemotePath 解析远程路径，如果是目录则附加源文件名
 func (tm *TransferManager) resolveRemotePath(sftpClient *sftp.Client, localPath, remotePath string) string {
 	// 解析远程路径中的 ~
-	remotePath = tm.expandRemoteTilde(sftpClient, remotePath)
+	remotePath = tm.expandRemoteTilde(remotePath)
 	// 如果远程路径以 / 结尾，说明用户明确指定了目录
 	if strings.HasSuffix(remotePath, "/") {
 		baseFileName := filepath.Base(localPath)
@@ -584,11 +593,11 @@ func (tm *TransferManager) resolveRemotePath(sftpClient *sftp.Client, localPath,
 }
 
 // expandRemoteTilde 将远程路径中的 ~ 扩展为用户的 HOME 目录
-func (tm *TransferManager) expandRemoteTilde(sftpClient *sftp.Client, path string) string {
+func (tm *TransferManager) expandRemoteTilde(path string) string {
 	if !strings.HasPrefix(path, "~") {
 		return path
 	}
-	homeDir := tm.getRemoteHomeDir(sftpClient)
+	homeDir := tm.getRemoteHomeDir()
 	// 如果只是 ~，替换为 /home/username 或 /root
 	if path == "~" {
 		// 获取远程用户的 HOME 目录
@@ -612,23 +621,9 @@ func (tm *TransferManager) expandRemoteTilde(sftpClient *sftp.Client, path strin
 }
 
 // getRemoteHomeDir 获取远程用户的 HOME 目录
-func (tm *TransferManager) getRemoteHomeDir(sftpClient *sftp.Client) string {
-	// 确保我们有 SSH 客户端引用
-	if tm.sshClient == nil {
-		log.Println("SSH client is not initialized")
-		return ""
-	}
-
-	// 创建一个新的会话来执行命令
-	session, err := tm.sshClient.NewSession()
-	if err != nil {
-		log.Println("Failed to create new SSH session:", err)
-		return ""
-	}
-	defer session.Close()
-
+func (tm *TransferManager) getRemoteHomeDir() string {
 	// 执行命令获取 HOME 环境变量
-	output, err := session.Output("echo $HOME")
+	output, err := tm.runRemoteCommand("echo $HOME")
 	if err == nil && len(output) > 0 {
 		homeDir := strings.TrimSpace(string(output))
 		if homeDir != "" && homeDir != "$HOME" {
@@ -637,7 +632,7 @@ func (tm *TransferManager) getRemoteHomeDir(sftpClient *sftp.Client) string {
 	}
 
 	// 备用方法：尝试使用 whoami 获取用户名然后构造 HOME 路径
-	output, err = session.Output("whoami")
+	output, err = tm.runRemoteCommand("whoami")
 	if err == nil && len(output) > 0 {
 		username := strings.TrimSpace(string(output))
 		if username != "" {
@@ -649,6 +644,25 @@ func (tm *TransferManager) getRemoteHomeDir(sftpClient *sftp.Client) string {
 	}
 
 	return ""
+}
+
+func (tm *TransferManager) runRemoteCommand(command string) ([]byte, error) {
+	if tm.remoteCommand != nil {
+		return tm.remoteCommand(command)
+	}
+	if tm.sshClient == nil {
+		log.Println("SSH client is not initialized")
+		return nil, fmt.Errorf("ssh client is not initialized")
+	}
+
+	session, err := tm.sshClient.NewSession()
+	if err != nil {
+		log.Println("Failed to create new SSH session:", err)
+		return nil, err
+	}
+	defer session.Close()
+
+	return session.Output(command)
 }
 
 // resolveLocalPath 解析本地路径，如果是目录则附加源文件名
