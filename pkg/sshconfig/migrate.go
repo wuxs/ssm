@@ -19,6 +19,42 @@ type MigrationResult struct {
 	IncludeAdded  bool
 }
 
+func SaveHost(cfg *config.SSHConfig) error {
+	ssmPath := SSMConfigPath()
+	existing, err := loadSSMConfigEntries(ssmPath)
+	if err != nil {
+		return err
+	}
+	alias := migrationAlias(*cfg)
+	if alias == "" {
+		alias = cfg.Host
+	}
+	if alias == "" {
+		alias = cfg.GetKey()
+	}
+	next := *cfg
+	next.Alias = alias
+	if next.Remark == "" && alias != next.Host {
+		next.Remark = alias
+	}
+	replaced := false
+	for i := range existing {
+		if existing[i].Alias == next.Alias || migrationIdentity(existing[i]) == migrationIdentity(next) {
+			existing[i] = next
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		existing = append(existing, next)
+	}
+	if err := writeSSMConfig(ssmPath, existing); err != nil {
+		return err
+	}
+	_, err = ensureSSMInclude(ConfigPath(), ssmPath)
+	return err
+}
+
 func SSMConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -46,6 +82,13 @@ func MigrateLegacy() (*MigrationResult, error) {
 		SSHConfigPath: ConfigPath(),
 		IncludeAdded:  includeAdded,
 	}, nil
+}
+
+func migrationIdentity(cfg config.SSHConfig) string {
+	if cfg.Host == "" {
+		return ""
+	}
+	return cfg.Username + "@" + cfg.Host + ":" + cfg.Port
 }
 
 func loadSSMConfigEntries(path string) ([]config.SSHConfig, error) {

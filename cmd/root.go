@@ -171,6 +171,9 @@ func establishConnection(cfg *config.SSHConfig, localForwards, remoteForwards []
 
 	// 连接成功，更新内存状态并保存 SSM SSH config metadata。
 	cfg.UpdateLastUsed()
+	if err := sshconfig.SaveHost(cfg); err != nil {
+		fmt.Printf("Warning: Failed to save SSH config: %v\n", err)
+	}
 	if cfg.Alias != "" && cfg.Password != "" {
 		if err := sshconfig.SavePassword(cfg); err != nil {
 			fmt.Printf("Warning: Failed to save password metadata: %v\n", err)

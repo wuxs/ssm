@@ -5,7 +5,51 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wuxs/ssm/pkg/config"
 )
+
+func TestSaveHostWritesSSMConfigAndInclude(t *testing.T) {
+	home := setupHome(t, "")
+	cfg := &config.SSHConfig{Host: "114.119.174.108", Username: "root", Port: "22"}
+
+	if err := SaveHost(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	ssmPath := filepath.Join(home, ".ssh", "ssm.config")
+	data, err := os.ReadFile(ssmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{"Host 114.119.174.108", "HostName 114.119.174.108", "User root", "Port 22"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ssm.config missing %q:\n%s", want, got)
+		}
+	}
+
+	mainData, err := os.ReadFile(filepath.Join(home, ".ssh", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mainData), "Include ~/.ssh/ssm.config") {
+		t.Fatalf("main config missing include:\n%s", mainData)
+	}
+
+	cfg.Port = "2222"
+	if err := SaveHost(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(ssmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = string(data)
+	if strings.Count(got, "Host 114.119.174.108") != 1 || !strings.Contains(got, "Port 2222") {
+		t.Fatalf("ssm.config was not updated in place:\n%s", got)
+	}
+}
 
 func TestMigrateLegacyEnsuresSSMConfigAndInclude(t *testing.T) {
 	home := setupHome(t, `Host existing

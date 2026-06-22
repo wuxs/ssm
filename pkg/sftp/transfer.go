@@ -58,6 +58,9 @@ func (tm *TransferManager) Transfer(sshConfig *config.SSHConfig, source, destina
 		return fmt.Errorf("failed to establish SSH connection: %v", err)
 	}
 	defer client.Close()
+	if err := sshconfig.SaveHost(sshConfig); err != nil {
+		fmt.Printf("Warning: Failed to save SSH config: %v\n", err)
+	}
 	if sshConfig.Alias != "" && sshConfig.Password != "" {
 		if err := sshconfig.SavePassword(sshConfig); err != nil {
 			fmt.Printf("Warning: Failed to save password metadata: %v\n", err)
