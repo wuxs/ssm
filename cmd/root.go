@@ -12,8 +12,9 @@ import (
 
 	"github.com/wuxs/ssm/pkg/auth"
 	"github.com/wuxs/ssm/pkg/config"
+	"github.com/wuxs/ssm/pkg/sshconfig"
 	"github.com/wuxs/ssm/pkg/terminal"
-	"github.com/wuxs/ssm/pkg/utils"
+	"github.com/wuxs/ssm/pkg/tui"
 )
 
 var rootCmd = &cobra.Command{
@@ -67,44 +68,40 @@ func runSSHCommand(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	// 如果没有参数，显示帮助信息
+	// 如果没有参数，打开历史连接 TUI
 	if len(args) < 1 {
-		cmd.Help()
+		sshConfig, err := tui.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to open TUI: %v\n", err)
+			os.Exit(1)
+		}
+		if sshConfig == nil {
+			return
+		}
+		if err := establishConnection(sshConfig, nil, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "Connection failed: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
 	host := args[0]
 
-	// 解析主机信息
-	username, hostname, port := utils.ParseSSHHost(host)
-
 	// 获取标志
 	privateKeyPath, _ := cmd.Flags().GetString("identity")
+	portFlag, _ := cmd.Flags().GetString("port")
 	proxyJump, _ := cmd.Flags().GetString("proxy-jump")
 	localForwards, _ := cmd.Flags().GetStringSlice("local-forward")
 	remoteForwards, _ := cmd.Flags().GetStringSlice("remote-forward")
-	privateKeyPath = utils.GetDefaultPrivateKeyPath(privateKeyPath)
 
-	// 检查现有配置
-	key := utils.GetConfigKey(username, hostname, port)
-	sshConfig, exists := config.Get(key)
-	if !exists {
-		// 创建新配置
-		sshConfig = &config.SSHConfig{
-			Host:       hostname,
-			Username:   username,
-			Port:       port,
-			PrivateKey: privateKeyPath,
-			ProxyJump:  proxyJump,
-		}
-	} else {
-		// 更新现有配置
-		if privateKeyPath != "" {
-			sshConfig.PrivateKey = privateKeyPath
-		}
-		if proxyJump != "" {
-			sshConfig.ProxyJump = proxyJump
-		}
+	sshConfig, err := sshconfig.Resolve(host, sshconfig.Options{
+		IdentityFile: privateKeyPath,
+		Port:         portFlag,
+		ProxyJump:    proxyJump,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to resolve SSH config: %v\n", err)
+		os.Exit(1)
 	}
 
 	// 建立SSH连接
@@ -172,10 +169,12 @@ func establishConnection(cfg *config.SSHConfig, localForwards, remoteForwards []
 	}
 	defer session.Close()
 
-	// 连接成功，更新并保存配置
+	// 连接成功，更新内存状态并保存 SSM SSH config metadata。
 	cfg.UpdateLastUsed()
-	if err := config.SaveConfig(cfg); err != nil {
-		fmt.Printf("Warning: Failed to save config: %v\n", err)
+	if cfg.Alias != "" && cfg.Password != "" {
+		if err := sshconfig.SavePassword(cfg); err != nil {
+			fmt.Printf("Warning: Failed to save password metadata: %v\n", err)
+		}
 	}
 
 	// 设置会话的输入输出
@@ -411,12 +410,6 @@ func connectWithJump(cfg *config.SSHConfig, clientConfig *ssh.ClientConfig) (*ss
 		return nil, fmt.Errorf("failed to connect to jump host: %v", err)
 	}
 
-	// 保存跳板机配置（如果连接成功）
-	jumpConfig.UpdateLastUsed()
-	if err := config.SaveConfig(jumpConfig); err != nil {
-		fmt.Printf("Warning: Failed to save jump host config: %v\n", err)
-	}
-
 	// 通过跳板机连接到目标服务器
 	targetAddr := cfg.Host + ":" + cfg.Port
 	fmt.Printf("Connecting to target host %s through jump host...\n", targetAddr)
@@ -438,22 +431,15 @@ func connectWithJump(cfg *config.SSHConfig, clientConfig *ssh.ClientConfig) (*ss
 }
 
 func parseJumpConfig(proxyJump string) *config.SSHConfig {
-	username, hostname, port := utils.ParseSSHHost(proxyJump)
-	key := utils.GetConfigKey(username, hostname, port)
-	// 先尝试从保存的配置中查找
-	if jumpConfig, exists := config.Get(key); exists {
+	jumpConfig, err := sshconfig.Resolve(proxyJump, sshconfig.Options{})
+	if err == nil {
 		return jumpConfig
 	}
-
-	return &config.SSHConfig{
-		Host:     hostname,
-		Username: username,
-		Port:     port,
-	}
+	return &config.SSHConfig{Host: proxyJump, Username: "root", Port: "22"}
 }
 
 func displayConfigs() {
-	configs, err := config.List()
+	configs, err := sshconfig.List()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load configs: %v\n", err)
 		return
@@ -466,7 +452,15 @@ func displayConfigs() {
 
 	fmt.Println("SSH Connection Configurations:")
 	for i, cfg := range configs {
-		line := fmt.Sprintf("%d. %s", i+1, cfg.GetKey())
+		remark := cfg.Remark
+		if remark == "" && cfg.Alias != "" && cfg.Alias != cfg.Host {
+			remark = cfg.Alias
+		}
+		if remark == "" {
+			remark = "-"
+		}
+		key := cfg.GetKey()
+		line := fmt.Sprintf("%d. %-20s %s", i+1, remark, key)
 		if cfg.ProxyJump != "" {
 			line += fmt.Sprintf(" via %s", cfg.ProxyJump)
 		}
@@ -475,7 +469,7 @@ func displayConfigs() {
 }
 
 func handleDelete(key string) {
-	if err := config.Delete(key); err != nil {
+	if err := sshconfig.Delete(key); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to delete config: %v\n", err)
 		os.Exit(1)
 	}

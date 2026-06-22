@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wuxs/ssm/pkg/config"
 	"github.com/wuxs/ssm/pkg/sftp"
-	"github.com/wuxs/ssm/pkg/utils"
+	"github.com/wuxs/ssm/pkg/sshconfig"
 )
 
 var cpCmd = &cobra.Command{
@@ -55,8 +55,6 @@ func runCopyCommand(cmd *cobra.Command, args []string) {
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	preserve, _ := cmd.Flags().GetBool("preserve")
 
-	privateKeyPath = utils.GetDefaultPrivateKeyPath(privateKeyPath)
-
 	// 解析源和目标
 	srcLocation, err := parseLocation(source, portFlag)
 	if err != nil {
@@ -94,7 +92,11 @@ func runCopyCommand(cmd *cobra.Command, args []string) {
 	}
 
 	// 创建SSH配置
-	sshConfig := createSSHConfigForLocation(remoteLocation, privateKeyPath, proxyJump)
+	sshConfig, err := createSSHConfigForLocation(remoteLocation, privateKeyPath, portFlag, proxyJump)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to resolve SSH config: %v\n", err)
+		os.Exit(1)
+	}
 
 	// 创建传输选项
 	options := &sftp.TransferOptions{
@@ -168,8 +170,8 @@ func parseLocation(location, defaultPort string) (LocationInterface, error) {
 		}, nil
 	}
 
-	// 解析远程主机信息
-	username, hostname, port := utils.ParseSSHHost(hostPart)
+	// 解析远程主机信息，保留空端口以便 .ssh/config 的 Port 生效。
+	username, hostname, port := parseRemoteHostPart(hostPart)
 	if defaultPort != "" {
 		port = defaultPort
 	}
@@ -182,27 +184,32 @@ func parseLocation(location, defaultPort string) (LocationInterface, error) {
 	}, nil
 }
 
-// createSSHConfigForLocation 为位置创建SSH配置
-func createSSHConfigForLocation(location *RemoteLocationInfo, privateKeyPath, proxyJump string) *config.SSHConfig {
-	// 尝试从现有配置中获取
-	key := utils.GetConfigKey(location.Username, location.Hostname, location.Port)
-	if sshConfig, exists := config.Get(key); exists {
-		// 更新配置
-		if privateKeyPath != "" {
-			sshConfig.PrivateKey = privateKeyPath
-		}
-		if proxyJump != "" {
-			sshConfig.ProxyJump = proxyJump
-		}
-		return sshConfig
+func parseRemoteHostPart(hostPart string) (username, hostname, port string) {
+	if atPos := strings.Index(hostPart, "@"); atPos >= 0 {
+		username = hostPart[:atPos]
+		hostPart = hostPart[atPos+1:]
 	}
+	if colonPos := strings.LastIndex(hostPart, ":"); colonPos >= 0 {
+		hostname = hostPart[:colonPos]
+		port = hostPart[colonPos+1:]
+	} else {
+		hostname = hostPart
+	}
+	return username, hostname, port
+}
 
-	// 创建新配置
-	return &config.SSHConfig{
-		Host:       location.Hostname,
-		Username:   location.Username,
-		Port:       location.Port,
-		PrivateKey: privateKeyPath,
-		ProxyJump:  proxyJump,
+// createSSHConfigForLocation 为位置创建SSH配置
+func createSSHConfigForLocation(location *RemoteLocationInfo, privateKeyPath, portFlag, proxyJump string) (*config.SSHConfig, error) {
+	target := location.Hostname
+	if location.Username != "" {
+		target = location.Username + "@" + target
 	}
+	if location.Port != "" {
+		target += ":" + location.Port
+	}
+	return sshconfig.Resolve(target, sshconfig.Options{
+		IdentityFile: privateKeyPath,
+		Port:         portFlag,
+		ProxyJump:    proxyJump,
+	})
 }

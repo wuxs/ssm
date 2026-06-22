@@ -14,6 +14,7 @@ import (
 
 	"github.com/wuxs/ssm/pkg/auth"
 	"github.com/wuxs/ssm/pkg/config"
+	"github.com/wuxs/ssm/pkg/sshconfig"
 )
 
 // TransferOptions 传输选项
@@ -57,6 +58,11 @@ func (tm *TransferManager) Transfer(sshConfig *config.SSHConfig, source, destina
 		return fmt.Errorf("failed to establish SSH connection: %v", err)
 	}
 	defer client.Close()
+	if sshConfig.Alias != "" && sshConfig.Password != "" {
+		if err := sshconfig.SavePassword(sshConfig); err != nil {
+			fmt.Printf("Warning: Failed to save password metadata: %v\n", err)
+		}
+	}
 	tm.sshClient = client
 
 	// 创建SFTP客户端
@@ -124,12 +130,6 @@ func (tm *TransferManager) connectWithJump(cfg *config.SSHConfig, clientConfig *
 		return nil, fmt.Errorf("failed to connect to jump host: %v", err)
 	}
 
-	// 保存跳板机配置（如果连接成功）
-	jumpConfig.UpdateLastUsed()
-	if err := config.SaveConfig(jumpConfig); err != nil {
-		fmt.Printf("Warning: Failed to save jump host config: %v\n", err)
-	}
-
 	// 通过跳板机连接到目标服务器
 	targetAddr := cfg.Host + ":" + cfg.Port
 	fmt.Printf("Connecting to target host %s through jump host...\n", targetAddr)
@@ -152,59 +152,11 @@ func (tm *TransferManager) connectWithJump(cfg *config.SSHConfig, clientConfig *
 
 // parseJumpConfig 解析跳板机配置
 func (tm *TransferManager) parseJumpConfig(proxyJump string) *config.SSHConfig {
-	// 这里需要导入utils包的解析函数
-	username := ""
-	hostname := ""
-	port := "22"
-
-	// 简单解析跳板机地址
-	if strings.Contains(proxyJump, "@") {
-		parts := strings.Split(proxyJump, "@")
-		if len(parts) == 2 {
-			username = parts[0]
-			hostPort := parts[1]
-			if strings.Contains(hostPort, ":") {
-				hostPortParts := strings.Split(hostPort, ":")
-				if len(hostPortParts) == 2 {
-					hostname = hostPortParts[0]
-					port = hostPortParts[1]
-				}
-			} else {
-				hostname = hostPort
-			}
-		}
-	} else {
-		if strings.Contains(proxyJump, ":") {
-			parts := strings.Split(proxyJump, ":")
-			if len(parts) == 2 {
-				hostname = parts[0]
-				port = parts[1]
-			}
-		} else {
-			hostname = proxyJump
-		}
-	}
-
-	// 获取默认用户名
-	if username == "" {
-		if user := os.Getenv("USER"); user != "" {
-			username = user
-		} else {
-			username = "root"
-		}
-	}
-
-	key := fmt.Sprintf("%s@%s:%s", username, hostname, port)
-	// 先尝试从保存的配置中查找
-	if jumpConfig, exists := config.Get(key); exists {
+	jumpConfig, err := sshconfig.Resolve(proxyJump, sshconfig.Options{})
+	if err == nil {
 		return jumpConfig
 	}
-
-	return &config.SSHConfig{
-		Host:     hostname,
-		Username: username,
-		Port:     port,
-	}
+	return &config.SSHConfig{Host: proxyJump, Username: "root", Port: "22"}
 }
 
 // uploadFile 上传文件或目录
