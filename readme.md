@@ -60,6 +60,25 @@ ssm user@hostname:2222
 ssm hostname  # 使用当前用户名
 ```
 
+### Bash 历史连接补全
+
+在当前 Bash 会话中启用（请先确保新版 `ssm` 在 PATH 中）：
+
+```bash
+source <(ssm completion bash)
+```
+
+若需每次启动 Bash 都启用，可自行将这一行加入 `~/.bashrc`。
+
+输入已保存 Host 别名或 `user@别名:port` 的前缀后按 Tab，SSM 从 `~/.ssh/config`（含 Include 的 `~/.ssh/ssm.config`）读取候选，按字母顺序循环切换。补全内容插入光标之后，光标停在原位置；再次 Tab 替换上次追加的内容，行中原有后续文本保持不变。
+
+```text
+ssm root@192.168.|         → Tab → ssm root@192.168.|1.159:22
+                          → Tab → ssm root@192.168.|1.227:22
+```
+
+`|` 表示光标。继续输入或移动光标后，下次 Tab 按新的位置重新匹配。没有候选时输入保持不变。支持根命令的连接目标及 `-J` / `--proxy-jump` 的独立参数；无用户名的主机前缀需与已存 Host 别名匹配。其他命令、子命令及引号、管道等复杂 Shell 写法保留原有 Tab 行为。脚本支持 Bash 的 Emacs 与 Vi 插入模式，可重复 source。一旦当前提示符使用了原生补全，后续 Tab 保持原生行为，直到下一个提示符再启用 SSM 补全；因此请直接输入 `ssm` 后再补全连接参数。
+
 ### 使用跳板机
 ```bash
 # 通过跳板机连接
